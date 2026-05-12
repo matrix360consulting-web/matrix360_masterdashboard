@@ -423,13 +423,29 @@ function OpsView({decisions,allTasks,overdue,needAction,aiRunning,pendingDecs,cr
   const execAI=async(task)=>{
     setRunningAI(task.id);
     updTask(task.decisionId,task.id,{status:"airunning"});
-    try{
-      const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:MODEL,max_tokens:800,messages:[{role:"user",content:`You are a Matrix360 AI agent. Execute this task completely for Ramjit Ray.\n\nDecision: "${task.decisionTitle}"\nTask: "${task.title}"\nNotes: ${task.notes||"none"}\n\nProduce the complete deliverable now. Production-ready. Matrix360 voice: direct, confident, no hype.`}]})});
-      const data=await r.json();
-      const out=data.content?.map(c=>c.text||"").join("")||"No output.";
-      updTask(task.decisionId,task.id,{status:"review",aiOutput:out});
-    }catch(e){updTask(task.decisionId,task.id,{status:"active",aiOutput:"Error: "+e.message});}
-    setRunningAI(null);
+    try {
+  const out = await askGemini(
+    `You are a Matrix360 AI agent. Execute this task completely for Ramjit Ray.
+
+Decision: "${task.decisionTitle}"
+Task: "${task.title}"
+Notes: ${task.notes || "none"}
+
+Produce the complete deliverable now. Production-ready. Matrix360 voice: direct, confident, no hype.`
+  );
+
+  updTask(task.decisionId, task.id, {
+    status: "review",
+    aiOutput: out
+  });
+} catch (e) {
+  updTask(task.decisionId, task.id, {
+    status: "active",
+    aiOutput: "Error: " + e.message
+  });
+}
+
+setRunningAI(null);
   };
 
   return(
@@ -700,13 +716,14 @@ function DecDetail({d,docs,onBack,onUpdate,onUpdateTask,onApprove,onEdit,onDelet
       gap:`Run HIOF Capability Gap Engine (206):\n"${d.title}"\nGap stated: ${d.capabilityGap}\n\nCompute Gap=f(R,C,W): Required capability, Current capability, Gap magnitude 0-100, AI compensation, Residual human requirement.`,
       execute:ts.find(t=>t.owner==="AI")?`Execute the first AI task for "${d.title}":\nTask: "${ts.find(t=>t.owner==="AI").title}"\nNotes: ${ts.find(t=>t.owner==="AI").notes}\nProduce the complete deliverable. Production-ready. Matrix360 voice.`:"No AI tasks for this decision.",
     };
-    try{
-      const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:MODEL,max_tokens:700,messages:[{role:"user",content:ps[mode]}]})});
-      const data=await r.json();
-      setAiOut(data.content?.map(c=>c.text||"").join("")||"No response.");
-    }catch(e){setAiOut("Error: "+e.message);}
-    setAiLoad(false);
-  };
+   try {
+  const reply = await askGemini(ps[mode]);
+  setAiOut(reply || "No response.");
+} catch (e) {
+  setAiOut("Error: " + e.message);
+}
+setAiLoad(false);
+};
 
   return(
     <div>
@@ -931,22 +948,43 @@ You have full operational awareness of this domain. Give direct, specific, actio
     const newMsgs=[...messages,{role:"user",content:msg,ts:Date.now()}];
     setMessages(newMsgs);
     setLoading(true);loadingRef.current=true;
-    try{
-      const r=await fetch("https://api.anthropic.com/v1/messages",{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({
-          model:MODEL,max_tokens:700,
-          system:buildSys(), // built fresh at send time with current context
-          messages:newMsgs.slice(-16).map(m=>({role:m.role,content:m.content}))
-        })
-      });
-      const data=await r.json();
-      const reply=data.content?.map(c=>c.text||"").join("")||"No response.";
-      setMessages([...newMsgs,{role:"assistant",content:reply,ts:Date.now()}]);
-      setTrained((trained||0)+1);
-    }catch(e){
-      setMessages([...newMsgs,{role:"assistant",content:"Connection error. Check your network and try again.",ts:Date.now()}]);
+   try {
+  const conversation = newMsgs
+    .slice(-16)
+    .map(m => `${m.role}: ${m.content}`)
+    .join("\n\n");
+
+  const prompt = `
+${buildSys()}
+
+Conversation:
+${conversation}
+
+Respond as the selected Matrix360 Co-Pilot.
+`;
+
+  const reply = await askGemini(prompt);
+
+  setMessages([
+    ...newMsgs,
+    {
+      role: "assistant",
+      content: reply || "No response.",
+      ts: Date.now()
     }
+  ]);
+
+  setTrained((trained || 0) + 1);
+} catch (e) {
+  setMessages([
+    ...newMsgs,
+    {
+      role: "assistant",
+      content: "Error: " + e.message,
+      ts: Date.now()
+    }
+  ]);
+}
     setLoading(false);loadingRef.current=false;
     setTimeout(()=>inputRef.current?.focus(),50);
   },[input,messages,buildSys,trained,setMessages,setTrained]);
@@ -1040,13 +1078,25 @@ function DocsView({decisions,docs,setDocs}){
 
   const summarise=async(doc)=>{
     setSumming(doc.id);
-    try{
-      const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:MODEL,max_tokens:160,messages:[{role:"user",content:`Summarise in 2 sentences for AI context. Focus on decisions it informs and intelligence it contains.\n\nDoc: "${doc.title}"\n${doc.description}\nTags: ${doc.tags?.join(", ")}`}]})});
-      const data=await r.json();
-      const s=data.content?.map(c=>c.text||"").join("")||"";
-      setDocs(docs.map(d=>d.id===doc.id?{...d,aiSummary:s}:d));
-    }catch(e){}
-    setSumming(null);
+   try {
+  const prompt = `Summarise in 2 sentences for AI context. Focus on decisions it informs and intelligence it contains.
+
+Doc: "${doc.title}"
+${doc.description}
+Tags: ${doc.tags?.join(", ")}`;
+
+  const s = await askGemini(prompt);
+
+  setDocs(
+    docs.map(d =>
+      d.id === doc.id
+        ? { ...d, aiSummary: s || "" }
+        : d
+    )
+  );
+} catch (e) {}
+
+setSumming(null);
   };
 
   const summariseAll=async()=>{for(const d of docs.filter(x=>!x.aiSummary)){await summarise(d);}};
@@ -1189,12 +1239,13 @@ PREDICTION: What decision will he most likely approve next?
 
 SYSTEM RECOMMENDATION: How should the HIOF OS adjust its behaviour in the next 7 days?`;
 
-    try{
-      const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:MODEL,max_tokens:900,messages:[{role:"user",content:prompt}]})});
-      const data=await r.json();
-      setAnalysis(data.content?.map(c=>c.text||"").join("")||"No response.");
-    }catch(e){setAnalysis("Error: "+e.message);}
-    setLoading(false);
+   try {
+  const reply = await askGemini(prompt);
+  setAnalysis(reply || "No response.");
+} catch (e) {
+  setAnalysis("Error: " + e.message);
+}
+setLoading(false);
   };
 
   return(
