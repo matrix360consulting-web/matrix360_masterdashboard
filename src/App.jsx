@@ -1,3 +1,4 @@
+import { askGemini } from "./gemini";
 import React, { useState, useEffect, useCallback, useRef, memo } from "react";
 
 // ═══════════════════════════════════════════════════════════════════════════
